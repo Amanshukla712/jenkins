@@ -1,8 +1,6 @@
 const express = require('express'),
     bodyParser = require('body-parser'),
-    // In order to use PUT HTTP verb to edit item
     methodOverride = require('method-override'),
-    // Mitigate XSS using sanitizer
     sanitizer = require('sanitizer'),
     app = express(),
     port = 8000
@@ -10,20 +8,26 @@ const express = require('express'),
 app.use(bodyParser.urlencoded({
     extended: false
 }));
-// https: //github.com/expressjs/method-override#custom-logic
+
 app.use(methodOverride(function (req, res) {
     if (req.body && typeof req.body === 'object' && '_method' in req.body) {
-        // look in urlencoded POST bodies and delete it
         let method = req.body._method;
         delete req.body._method;
         return method
     }
 }));
 
-
 let todolist = [];
 
-/* The to do list and the form are displayed */
+// ── SSE: keep track of all connected browsers ──────────────
+const clients = [];
+
+function broadcast(data) {
+    const payload = `data: ${JSON.stringify(data)}\n\n`;
+    clients.forEach(client => client.write(payload));
+}
+// ───────────────────────────────────────────────────────────
+
 app.get('/todo', function (req, res) {
         res.render('todo.ejs', {
             todolist,
@@ -31,29 +35,50 @@ app.get('/todo', function (req, res) {
         });
     })
 
-    /* Adding an item to the to do list */
+    // ── SSE endpoint — each browser connects here once ─────
+    .get('/events', function (req, res) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        // Send a heartbeat comment every 25s to keep connection alive
+        // through proxies / load balancers
+        const heartbeat = setInterval(() => res.write(': ping\n\n'), 25000);
+
+        clients.push(res);
+        console.log(`SSE client connected. Total: ${clients.length}`);
+
+        req.on('close', () => {
+            clearInterval(heartbeat);
+            const i = clients.indexOf(res);
+            if (i !== -1) clients.splice(i, 1);
+            console.log(`SSE client disconnected. Total: ${clients.length}`);
+        });
+    })
+    // ───────────────────────────────────────────────────────
+
     .post('/todo/add/', function (req, res) {
-        // Escapes HTML special characters in attribute values as HTML entities
         let newTodo = sanitizer.escape(req.body.newtodo);
         if (req.body.newtodo != '') {
             todolist.push(newTodo);
+            // Broadcast to every other open browser tab/user
+            broadcast({ type: 'add', todo: newTodo, list: todolist });
         }
         res.redirect('/todo');
     })
 
-    /* Deletes an item from the to do list */
     .get('/todo/delete/:id', function (req, res) {
         if (req.params.id != '') {
             todolist.splice(req.params.id, 1);
+            broadcast({ type: 'sync', list: todolist });
         }
         res.redirect('/todo');
     })
 
-    // Get a single todo item and render edit page
     .get('/todo/:id', function (req, res) {
         let todoIdx = req.params.id;
         let todo = todolist[todoIdx];
-
         if (todo) {
             res.render('edititem.ejs', {
                 todoIdx,
@@ -65,24 +90,22 @@ app.get('/todo', function (req, res) {
         }
     })
 
-    // Edit item in the todo list 
     .put('/todo/edit/:id', function (req, res) {
         let todoIdx = req.params.id;
-        // Escapes HTML special characters in attribute values as HTML entities
         let editTodo = sanitizer.escape(req.body.editTodo);
         if (todoIdx != '' && editTodo != '') {
             todolist[todoIdx] = editTodo;
+            broadcast({ type: 'sync', list: todolist });
         }
         res.redirect('/todo');
     })
-    /* Redirects to the to do list if the page requested is not found */
+
     .use(function (req, res, next) {
         res.redirect('/todo');
     })
 
     .listen(port, function () {
-        // Logging to console
         console.log(`Todolist running on http://0.0.0.0:${port}`)
     });
-// Export app
+
 module.exports = app;
